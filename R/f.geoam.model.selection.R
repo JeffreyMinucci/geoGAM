@@ -305,144 +305,50 @@ f.prepare.validation.ext <- function( dat, pred, gam.fit = 0, v.family ){
 f.boost <- function( resp, dat, p.offset.lm, val.data, f.fact.off, v.family,
                      gam.selection = 1, t.sets, non.stat, max.stop, coords){
 
-  # Cutoff for baselearner selection for GAM
-  sel.haupt <- 1
-  sel.inter <- 1.2 # choose a bit less interactions
-
-  l.fact <- names(dat)[ unlist( lapply( dat, is.factor) ) == TRUE ]
-  l.fact <- grep( paste0("^", resp, "$"), l.fact, invert = T, value = T)
-
-  l.num <- names(dat)[ unlist( lapply( dat, is.factor) ) == FALSE ]
-
-  # Create Boosting-Baselearner-Formula
-
-  # for Multnom expand baselearners (p. 33 of mboost manual)
-  if( v.family[[2]] == "Multinomial"){
-    X0 <- K0 <- diag(nlevels(dat[, resp]) - 1)
-    colnames(X0) <- levels(dat[, resp])[-nlevels(dat[, resp])]
-    t.exp <- "%O% buser(X0, K0, df = 2)"
-  } else {
-    t.exp <- ""
-  }
-
-  # Verschieden Formel-Bestandteile erstellen
-  # Response
-  f.resp <- paste(resp, " ~ ")
-
-  # Create Intercept separate
-  f.int <- paste( "bols(int, intercept = F, df = 1)", t.exp)
-
-  # Spatial Term
-  if( !is.null(coords)) {
-    f.spat <- paste( "bspatial(", paste(coords, collapse = ","), ", df = 5, knots = 12)", t.exp)
-    } else{ f.spat <- c() }
-
-
-  ## Factors, group if less than 6 levels (dummy coding for df=5)
-  f.fact <- f.short <- c()
-  for(fact in l.fact){
-    if( length( levels(dat[, fact]) ) > 5) {
-      if(length( levels(dat[, fact]) ) > 5 & v.family[[2]] == "Multinomial"){
-        # factors cannot be fitted without intercept if nlevels > df*2 (?)
-        f.fact <- c(f.fact, paste(" bols(", fact, ", df = 5, intercept = T)", t.exp ))
-      } else {
-        f.fact <- c(f.fact, paste(" bols(", fact, ", df = 5, intercept = F)", t.exp ))
-      }
-    } else {
-      f.short <- c(f.short, fact)
-    }
-  }
-  f.fact <- paste( f.fact, collapse = "+")
-
-  # Assign SHORT level factors to groups
-  # assume neighborhood in data frame, means similar topic to form a group
-  f.sh <- c()
-  if( length(f.short) >= 2 ){
-    while( length(f.short) > 0 ){
-      n.levels <- unlist( lapply( dat[, f.short], nlevels) )
-      ii <- 1
-      t.df <- 0
-      # add up degrees of freedom
-      while( t.df < 6 ){
-        t.df <- sum( t.df, n.levels[ii]-1)
-        ii <- ii+1
-      }
-      # in case factors with not enough levels left over (sum<6), add to last baselearner
-      if( ii-1 < length(n.levels) ){
-        t.leftover <- sum(n.levels[ii:length(n.levels)]) - length( ii:length(n.levels) )
-        if( t.leftover < 6 ){ii <- length(n.levels)+1}
-      }
-
-      f.sh <- c( f.sh,
-                 paste( "bols(", paste(f.short[1:(ii-1)], collapse = ", "),
-                        ", df = 5, intercept = F)", t.exp) )
-      # remove used factors
-      f.short <- f.short[ -c(1:(ii-1)) ]
-    }
-    f.factor <- paste(  paste( f.sh, collapse = "+") ) # short level factors
-
-  } else if( length(f.short) == 1){
-    f.factor <- paste(" bols(", f.short, ", df = 5, intercept = F)", t.exp )
-  } else {
-    f.factor <- c()
-  }
-
-  if( nchar(f.fact) > 0 ){ f.factor <- paste( f.factor, f.fact, sep = "+")}  # long level factors
-  f.factor <- sub( "^\\+|^ \\+", "", f.factor)
-
-
-  ## Splines
-  # Numerische bbs()
-  f.num.bbs <- paste( "bbs(",
-                      paste(
-                        l.num[ -which( l.num %in% c(resp, coords, "int"))],
-                        collapse = paste(", center = F, df = 5)", t.exp, " + bbs("
+ 
+#### Function to create an Mboost formula with spatial effects, non-stationary effects, and all two-way interactions
+#    of continuous variables 
+  
+makeMboostForm <- function(df){
+  names <- colnames(makeMboostForm)
+  coords <- c("x","y")
+  factors <- names[is.factor(names)]
+  nums <- names[-which(names %in% c(spatial,factors))]
+  
+  #Make splines
+  form.bbs <- paste( "bbs(",
+                      paste(nums,
+                        collapse = paste(", center = T, df = 5)", t.exp, " + bbs("
                         )),
-                      ", center = F, df = 5)", t.exp,
+                      ", center = T, df = 5)",
                       sep = ""
   )
+  
+  #Make spatial
+  form.spatial <- "bspatial(x,y,df=5,knots=12)+"
+  
+  #Make nonstationary
+  #form.nonspatial <- paste( "bspatial(", paste(coords, collapse = ","), ", by=",
+  #                     paste(nums,
+  #                       collapse = paste(
+  #                         ", df=5, knots = 12) ", t.exp , " + bspatial(", paste(coords, collapse = ","), ", by=" )
+  #                     ),
+  #                     ", df=5, knots = 12)", t.exp,
+  #                     sep = ""
+  #) 
+ 
+  
+  #make factors
+  form.bols  paste( "bols(",
+                    paste(factors,
+                          collapse = paste(", intercept = F, df = 5)", t.exp, " + bols("
+                          )),
+                    ", intercept = F, df = 5)",
+                    sep = "")
+  return(paste(form.bbs,form.spatial,form.bols,collapse="+"))
 
-  # create Apex interaction for images 2014 and 2013
 
-  # Numerische by Indikator bbs(); # bbs(x, by = z, df = 5)
-  l.apx <- grep( "apxb", l.num, value = T)
-  int.apx <- grep( "apxi", l.fact, value = T)
-  if( length( l.apx) > 0 ){
-    f.num.bbs.apx <- paste( "bbs(",
-                            paste(
-                              l.apx,
-                              collapse = paste(", by=", int.apx, ", center = F, df = 5)", t.exp, " + bbs("
-                              )),
-                            ", by=", int.apx, ", center = F, df = 5)", t.exp,
-                            sep = ""
-    )
-    f.num.bbs <- paste(f.num.bbs, "+", f.num.bbs.apx)
-  }
-
-
-  # Numerische vs. bspatial
-  if( !is.null(coords) ){
-  l.sub.num <- l.num[ -which( l.num %in% c(resp, coords, "int") )]
-  f.spat.int <- paste( "bspatial(", paste(coords, collapse = ","), ", by=",
-                       paste(
-                         l.sub.num,
-                         collapse = paste(
-                           ", df=5, knots = 12) ", t.exp , " + bspatial(", paste(coords, collapse = ","), ", by=" )
-                       ),
-                       ", df=5, knots = 12)", t.exp,
-                       sep = ""
-  ) } else{ f.spat.int <- c() }
-
-  # Create formula
-  if( non.stat == 0 ){
-    a.form <- as.formula( paste( f.resp, paste( c(f.int, f.num.bbs, f.spat,
-                                                  f.factor),
-                                                collapse = "+")) )
-  } else {
-    a.form <- as.formula( paste( f.resp, paste( c(f.int, f.num.bbs, f.spat,
-                                                  f.factor , f.spat.int), collapse = "+" ) ) )
-  }
-
+}
 
   m.boost.1 <- gamboost( a.form, data = dat,
                          control = boost_control(mstop = max.stop),
